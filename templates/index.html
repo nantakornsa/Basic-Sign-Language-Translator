@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ตัวช่วยรู้จำภาษามือพื้นฐาน</title>
+  <style>
+    :root { color-scheme: light; font-family: "Segoe UI", Tahoma, sans-serif; color: #172033; background: #f3f6fb; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+    main { width: min(980px, 100%); background: white; border-radius: 20px; padding: 28px; box-shadow: 0 14px 45px #24324d1c; }
+    h1 { margin: 0 0 8px; font-size: clamp(1.5rem, 3vw, 2.15rem); }
+    .intro { color: #526078; margin-top: 0; }
+    .grid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(250px, .8fr); gap: 24px; align-items: stretch; }
+    video { display: block; width: 100%; aspect-ratio: 4/3; object-fit: cover; background: #101827; border-radius: 14px; transform: scaleX(-1); }
+    .result { border: 1px solid #e0e7f0; border-radius: 14px; padding: 20px; display: flex; flex-direction: column; }
+    .label { font-size: .95rem; color: #64748b; }
+    #prediction { font-size: clamp(1.8rem, 4vw, 2.8rem); font-weight: 700; min-height: 1.5em; margin: 8px 0 16px; color: #155eef; overflow-wrap: anywhere; }
+    #confidence { color: #526078; }
+    progress { width: 100%; height: 12px; accent-color: #155eef; }
+    .controls { display: flex; gap: 10px; margin-top: auto; padding-top: 24px; flex-wrap: wrap; }
+    button { border: 0; border-radius: 10px; padding: 11px 16px; font: inherit; font-weight: 600; cursor: pointer; }
+    #start { color: white; background: #155eef; } #stop { color: #24324d; background: #e9eef6; }
+    #status { color: #526078; min-height: 1.4em; margin: 14px 0 0; }
+    .note { font-size: .9rem; color: #64748b; margin: 18px 0 0; }
+    @media (max-width: 700px) { .grid { grid-template-columns: 1fr; } main { padding: 18px; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>ตัวช่วยรู้จำภาษามือพื้นฐาน</h1>
+  {% if demo %}<p class="intro">ใช้ปุ่มตัวอย่างเพื่อสาธิตหน้าจอ หรือเปิดกล้องเพื่อแสดงตัวอย่างส่วนติดต่อ</p>
+  {% else %}<p class="intro">อนุญาตให้ใช้กล้อง แล้วทำท่าภาษามือที่อยู่ในชุดข้อมูล ระบบจะแสดงคำหรือวลีภาษาไทย</p>{% endif %}
+  {% if demo %}<p class="intro" style="color:#a04b00;font-weight:700">โหมดสาธิต: ปุ่มด้านล่างแสดงข้อความตัวอย่างจำลอง ไม่ได้ตรวจจับหรือแปลภาษามือ</p>{% endif %}
+  <div class="grid">
+    <video id="video" autoplay playsinline muted></video>
+    <section class="result" aria-live="polite">
+      <span class="label">ข้อความที่ระบบรู้จำ</span>
+      <div id="prediction">พร้อมเริ่มใช้งาน</div>
+      <span id="confidence">ความมั่นใจ: -</span>
+      <progress id="progress" value="0" max="100"></progress>
+      <span id="frames">สะสมลำดับภาพ 0 / {{ sequence_length }} เฟรม</span>
+      <div class="controls">
+        <button id="start">เปิดกล้อง</button>
+        <button id="stop" disabled>หยุดกล้อง</button>
+      </div>
+      {% if demo %}
+      <div class="controls" id="demo-controls">
+        {% for phrase in demo_phrases %}<button class="demo-phrase" data-phrase="{{ phrase }}">ตัวอย่าง: {{ phrase }}</button>{% endfor %}
+      </div>
+      {% endif %}
+      <p id="status">ระบบจะส่งภาพจากกล้องไปประมวลผลบนเครื่องที่เปิดเว็บแอป</p>
+    </section>
+  </div>
+  <p class="note">ผลลัพธ์จำกัดเฉพาะคำและวลีในชุดข้อมูลที่ใช้ฝึก ไม่ใช่การแปลภาษามือแบบบทสนทนาอิสระ</p>
+</main>
+<script>
+(() => {
+  const video = document.querySelector('#video');
+  const startButton = document.querySelector('#start');
+  const stopButton = document.querySelector('#stop');
+  const prediction = document.querySelector('#prediction');
+  const status = document.querySelector('#status');
+  const confidence = document.querySelector('#confidence');
+  const progress = document.querySelector('#progress');
+  const frames = document.querySelector('#frames');
+  const DEMO = {{ 'true' if demo else 'false' }};
+  const canvas = document.createElement('canvas');
+  const clientId = localStorage.getItem('sign-client-id') || crypto.randomUUID();
+  localStorage.setItem('sign-client-id', clientId);
+  let stream = null;
+  let running = false;
+  let busy = false;
+
+  async function stopCamera() {
+    running = false;
+    if (stream) stream.getTracks().forEach(track => track.stop());
+    stream = null;
+    video.srcObject = null;
+    startButton.disabled = false;
+    stopButton.disabled = true;
+    status.textContent = 'หยุดกล้องแล้ว';
+    fetch('/api/reset', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({client_id: clientId})}).catch(() => {});
+  }
+
+  async function sendFrame() {
+    if (DEMO) return;
+    if (!running || busy || video.readyState < 2) return;
+    busy = true;
+    const sentAt = performance.now();
+    try {
+      canvas.width = 640;
+      canvas.height = Math.round(640 * video.videoHeight / video.videoWidth);
+      canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+      const response = await fetch('/api/predict', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({client_id: clientId, image: canvas.toDataURL('image/jpeg', 0.72)})
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'ประมวลผลภาพไม่สำเร็จ');
+      prediction.textContent = data.text;
+      confidence.textContent = `ความมั่นใจ: ${(data.confidence * 100).toFixed(1)}% · เวลาตอบสนอง ${(performance.now() - sentAt).toFixed(0)} ms`;
+      progress.value = Math.min(100, data.confidence * 100);
+      frames.textContent = `สะสมลำดับภาพ ${data.frames} / ${data.sequence_length} เฟรม`;
+    } catch (error) {
+      status.textContent = error.message;
+    } finally {
+      busy = false;
+      if (running) window.setTimeout(sendFrame, 90);
+    }
+  }
+
+  startButton.addEventListener('click', async () => {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({video: {facingMode: 'user'}, audio: false});
+      video.srcObject = stream;
+      await video.play();
+      running = true;
+      startButton.disabled = true;
+      stopButton.disabled = false;
+      status.textContent = 'กล้องทำงานแล้ว วางมือให้อยู่ในกรอบภาพ';
+      sendFrame();
+    } catch (error) {
+      status.textContent = `เปิดกล้องไม่ได้: ${error.message}`;
+    }
+  });
+  stopButton.addEventListener('click', stopCamera);
+  document.querySelectorAll('.demo-phrase').forEach(button => {
+    button.addEventListener('click', async () => {
+      try {
+        const response = await fetch('/api/demo', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({phrase: button.dataset.phrase})
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'แสดงตัวอย่างไม่ได้');
+        prediction.textContent = data.text;
+        confidence.textContent = 'ตัวอย่างข้อความสำหรับการนำเสนอ (ผลจำลอง)';
+        progress.value = 0;
+        status.textContent = 'โหมดสาธิต: ยังไม่มีโมเดลรู้จำภาษามือ';
+      } catch (error) { status.textContent = error.message; }
+    });
+  });
+  window.addEventListener('pagehide', stopCamera);
+})();
+</script>
+</body>
+</html>

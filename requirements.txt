@@ -1,0 +1,7 @@
+opencv-contrib-python==4.11.0.86
+mediapipe==0.10.21
+tensorflow==2.16.2
+scikit-learn>=1.4,<2
+numpy>=1.26,<2
+contourpy<1.4
+Flask>=3.0,<4
